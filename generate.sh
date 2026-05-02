@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 mkdir -p configs/xray configs/hysteria configs/mtg output/qr
 
@@ -7,8 +7,14 @@ SERVER_IP=$(curl -4 -s ifconfig.me)
 UUID=$(cat /proc/sys/kernel/random/uuid)
 
 XRAY_KEYS=$(docker run --rm ghcr.io/xtls/xray-core:latest x25519)
-PRIVATE_KEY=$(echo "$XRAY_KEYS" | awk '/PrivateKey:/ {print $2}')
-PUBLIC_KEY=$(echo "$XRAY_KEYS" | awk -F': ' '/PublicKey/ {print $2}')
+PRIVATE_KEY=$(printf '%s\n' "$XRAY_KEYS" | awk -F': ' '/Private/{print $2; exit}')
+PUBLIC_KEY=$(printf '%s\n' "$XRAY_KEYS" | awk -F': ' '/Public|Password/{print $2; exit}')
+
+if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
+  echo "ERROR: Xray keys were not generated correctly" >&2
+  printf '%s\n' "$XRAY_KEYS" >&2
+  exit 1
+fi
 
 SHORT_ID=$(openssl rand -hex 8)
 HY_PASSWORD=$(openssl rand -hex 8)
@@ -38,6 +44,30 @@ cat > configs/xray/config.json <<EOL
   },
   "inbounds": [
     {
+      "tag": "socks-in",
+      "listen": "0.0.0.0",
+      "port": 1080,
+      "protocol": "socks",
+      "settings": {
+        "auth": "password",
+        "accounts": [
+          {
+            "user": "$SOCKS_USER",
+            "pass": "$SOCKS_PASS"
+          }
+        ],
+        "udp": true
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ]
+      }
+    },
+    {
       "tag": "vless-reality-in",
       "listen": "0.0.0.0",
       "port": 443,
@@ -66,23 +96,6 @@ cat > configs/xray/config.json <<EOL
             "$SHORT_ID"
           ]
         }
-      }
-    },
-    {
-      "tag": "socks5-in",
-      "listen": "0.0.0.0",
-      "port": 1080,
-      "protocol": "socks",
-      "settings": {
-        "auth": "password",
-        "accounts": [
-          {
-            "user": "$SOCKS_USER",
-            "pass": "$SOCKS_PASS"
-          }
-        ],
-        "udp": true,
-        "ip": "0.0.0.0"
       },
       "sniffing": {
         "enabled": true,
@@ -94,19 +107,16 @@ cat > configs/xray/config.json <<EOL
       }
     }
   ],
-  "outbounds": [
-    {
-      "tag": "direct",
-      "protocol": "freedom"
-    },
-    {
-      "tag": "block",
-      "protocol": "blackhole"
-    }
-  ],
   "routing": {
     "domainStrategy": "IPIfNonMatch",
     "rules": [
+      {
+        "type": "field",
+        "inboundTag": [
+          "socks-in"
+        ],
+        "outboundTag": "direct"
+      },
       {
         "type": "field",
         "protocol": [
@@ -115,7 +125,17 @@ cat > configs/xray/config.json <<EOL
         "outboundTag": "block"
       }
     ]
-  }
+  },
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    },
+    {
+      "protocol": "blackhole",
+      "tag": "block"
+    }
+  ]
 }
 EOL
 
@@ -154,7 +174,7 @@ MTG_SECRET_2095=$MTG_SECRET_2095
 EOL
 chmod 600 .env
 
-VLESS_LINK="vless://$UUID@$SERVER_IP:443?security=reality&sni=www.cloudflare.com&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID&type=tcp&flow=xtls-rprx-vision#VLESS"
+VLESS_LINK="vless://$UUID@$SERVER_IP:443?encryption=none&security=reality&sni=www.cloudflare.com&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID&type=tcp&flow=xtls-rprx-vision#VLESS-VISION"
 HY_LINK="hysteria2://$HY_PASSWORD@$SERVER_IP:2053/?insecure=1&sni=news.ycombinator.com#HY2"
 MTG_LINK_8888="tg://proxy?server=$SERVER_IP&port=8888&secret=$MTG_SECRET_8888"
 MTG_LINK_2095="tg://proxy?server=$SERVER_IP&port=2095&secret=$MTG_SECRET_2095"
@@ -179,10 +199,16 @@ user: $SOCKS_USER
 pass: $SOCKS_PASS
 EOL
 
+echo "$VLESS_LINK" > output/vless.txt
+
 qrencode -o output/qr/vless.png "$VLESS_LINK"
 qrencode -o output/qr/hysteria.png "$HY_LINK"
 qrencode -o output/qr/mtg-8888.png "$MTG_LINK_8888"
 qrencode -o output/qr/mtg-2095.png "$MTG_LINK_2095"
 
 echo "[OK] Generated:"
+echo "UUID=$UUID"
+echo "PUBLIC_KEY=$PUBLIC_KEY"
+echo "SHORT_ID=$SHORT_ID"
+echo
 cat output/links.txt
