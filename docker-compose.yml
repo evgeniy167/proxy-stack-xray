@@ -4,6 +4,7 @@ services:
     container_name: xray
     restart: always
     network_mode: host
+    user: root
     volumes:
       - ./configs/xray/config.json:/etc/xray/config.json:ro
     command: run -config /etc/xray/config.json
